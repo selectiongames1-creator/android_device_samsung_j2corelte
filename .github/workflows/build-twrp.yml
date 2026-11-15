@@ -1,0 +1,129 @@
+name: Build TWRP - j2corelte
+
+on:
+  workflow_dispatch:
+    inputs:
+      MANIFEST_URL:
+        description: Minimal TWRP manifest
+        required: true
+        default: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni
+      MANIFEST_BRANCH:
+        description: Manifest branch
+        required: true
+        default: twrp-8.1
+      DEVICE_TREE_URL:
+        description: Device tree git URL
+        required: true
+        default: https://github.com/Vladislav4KZ/android_device_samsung_j2corelte
+      DEVICE_TREE_BRANCH:
+        description: Device tree branch
+        required: true
+        default: android-8.1
+      DEVICE_PATH:
+        description: Device tree path inside the source tree
+        required: true
+        default: device/samsung/j2corelte
+      DEVICE_NAME:
+        description: Device codename (PRODUCT_DEVICE)
+        required: true
+        default: j2corelte
+      MAKEFILE_NAME:
+        description: Product/lunch name (without -eng)
+        required: true
+        default: omni_j2corelte
+      BUILD_TARGET:
+        description: Image target (recovery/boot)
+        required: true
+        default: recovery
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      MANIFEST_URL: ${{ github.event.inputs.MANIFEST_URL }}
+      MANIFEST_BRANCH: ${{ github.event.inputs.MANIFEST_BRANCH }}
+      DEVICE_TREE_URL: ${{ github.event.inputs.DEVICE_TREE_URL }}
+      DEVICE_TREE_BRANCH: ${{ github.event.inputs.DEVICE_TREE_BRANCH }}
+      DEVICE_PATH: ${{ github.event.inputs.DEVICE_PATH }}
+      DEVICE_NAME: ${{ github.event.inputs.DEVICE_NAME }}
+      MAKEFILE_NAME: ${{ github.event.inputs.MAKEFILE_NAME }}
+      BUILD_TARGET: ${{ github.event.inputs.BUILD_TARGET }}
+    steps:
+      - name: Show parameters
+        run: |
+          echo "Manifest:    $MANIFEST_URL ($MANIFEST_BRANCH)"
+          echo "Device tree: $DEVICE_TREE_URL ($DEVICE_TREE_BRANCH)"
+          echo "Device path: $DEVICE_PATH"
+          echo "Lunch:       ${MAKEFILE_NAME}-eng"
+          echo "Target:      ${BUILD_TARGET}image"
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Build inside Ubuntu 20.04 container
+        run: |
+          mkdir -p workspace
+          docker run --rm -i \
+            -v "$PWD/workspace:/workspace" \
+            -w /workspace \
+            -e MANIFEST_URL -e MANIFEST_BRANCH \
+            -e DEVICE_TREE_URL -e DEVICE_TREE_BRANCH \
+            -e DEVICE_PATH -e DEVICE_NAME \
+            -e MAKEFILE_NAME -e BUILD_TARGET \
+            ubuntu:20.04 bash -s <<'SCRIPT'
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          export LC_ALL=C
+          export ALLOW_MISSING_DEPENDENCIES=true
+
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+            gawk git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev libc6-dev libgl1-mesa-dev liblz4-tool libncurses5 \
+            libncurses5-dev libsdl1.2-dev libssl-dev libwxgtk3.0-gtk3-dev \
+            libxml2 libxml2-utils lzop openjdk-8-jdk pngcrush python2 \
+            python2-minimal python3 rsync schedtool squashfs-tools unzip \
+            x11proto-core-dev xsltproc zip zlib1g-dev
+
+          ln -sf /usr/bin/python2.7 /usr/bin/python
+          export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+          export PATH="$JAVA_HOME/bin:$PATH"
+
+          git config --global user.name "TWRP CI"
+          git config --global user.email "twrp-ci@users.noreply.github.com"
+
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          chmod +x /usr/local/bin/repo
+
+          repo init --depth=1 --no-clone-bundle -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH"
+          repo sync -j"$(nproc)" --force-sync --no-clone-bundle
+
+          rm -rf "$DEVICE_PATH"
+          git clone --depth=1 "$DEVICE_TREE_URL" -b "$DEVICE_TREE_BRANCH" "$DEVICE_PATH"
+
+          source build/envsetup.sh
+          lunch "${MAKEFILE_NAME}-eng"
+          make -j"$(nproc)" "${BUILD_TARGET}image"
+          SCRIPT
+
+      - name: Upload TWRP image
+        uses: actions/upload-artifact@v4
+        with:
+          name: twrp-${{ github.event.inputs.DEVICE_NAME }}-${{ github.run_id }}
+          path: |
+            workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img
+            workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.tar
+          if-no-files-found: warn
+          retention-days: 30
